@@ -1,0 +1,47 @@
+name: Read-only Cloudflare state check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Inspect CF state
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          api() { curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "$@"; }
+          ZID=$(api "https://api.cloudflare.com/client/v4/zones?name=12348123.xyz" | jq -r '.result[0].id // empty')
+          echo "ZONE_ID=$ZID"
+
+          echo "===== PAGES PROJECTS ====="
+          api "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/pages/projects" \
+            | jq -c '{success, errors, projects: [.result[] | {name, subdomain, production_branch, created_on}]}'
+
+          echo "===== PAGES PROJECT DETAIL (domains/deployments) ====="
+          for p in $(api "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/pages/projects" | jq -r '.result[].name'); do
+            echo "--- project: $p ---"
+            api "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/pages/projects/$p" \
+              | jq -c '.result | {name, domains, build_config, env_vars_count: (.env_vars|length)}'
+            api "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/pages/projects/$p/deployments?per_page=3" \
+              | jq -c '{count: (.result|length), latest: [.result[] | {id, status, created_on}]}'
+          done
+
+          echo "===== WORKERS SCRIPTS ====="
+          api "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/workers/scripts" \
+            | jq -c '{success, scripts: [.result[] | {id, modified_on}]}'
+
+          echo "===== ZONE DNS RECORDS (all) ====="
+          api "https://api.cloudflare.com/client/v4/zones/$ZID/dns_records?per_page=100" \
+            | jq -c '{success, records: [.result[] | {name, type, content, proxied, priority}]}'
+
+          echo "===== SITE TEST ====="
+          for path in / /admin; do
+            curl -sS -o /dev/null -w "$path -> HTTP %{http_code} in %{time_total}s\n" -m 15 "https://sanbay.12348123.xyz$path" || echo "$path failed"
+          done
